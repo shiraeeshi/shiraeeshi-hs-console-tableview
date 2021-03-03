@@ -204,30 +204,15 @@ editMode appState@(AppState appRows (PagingInfo rowsPerPage rowOffset) sorts fil
       filterDialog columnName appState fltr
     _ -> return ()
 
+
 filterDialog :: String -> AppStateData -> String -> IO ()
 filterDialog columnName appState tmpFilter = do
   let
     txt = "enter filter for column \"" ++ columnName ++ "\":"
     lentxt = length txt
-    topStr    = "┌" ++ (replicate lentxt '─') ++ "┐"
-    middleStr = "│" ++ (replicate lentxt ' ') ++ "│"
-    bottomStr = "└" ++ (replicate lentxt '─') ++ "┘"
     yPos = 5
     xPos = 10
-  saveCursor
-  setCursorPosition yPos xPos
-  putStr topStr
-  setCursorPosition (yPos+1) xPos
-  putStr middleStr
-  setCursorPosition (yPos+2) xPos
-  putStr middleStr
-  setCursorPosition (yPos+1) (xPos+1)
-  putStr txt
-  setCursorPosition (yPos+2) (xPos+1)
-  putStr tmpFilter
-  setCursorPosition (yPos+3) xPos
-  putStr bottomStr
-  restoreCursor
+  showInRectangle xPos yPos lentxt [txt, tmpFilter]
   key <- getKey
   case key of
     "\n" -> mainLoop (stateWithNewFilter appState columnName tmpFilter)
@@ -242,34 +227,33 @@ sortDirectionDialog columnName appState = do
     txtDesc = "d - descending"
     txtNo = "n - no sort"
     lentxt = length txt
-    topStr    = "┌" ++ (replicate lentxt '─') ++ "┐"
-    middleStr = "│" ++ (replicate lentxt ' ') ++ "│"
-    bottomStr = "└" ++ (replicate lentxt '─') ++ "┘"
     yPos = 5
     xPos = 10
-  saveCursor
-  setCursorPosition yPos xPos
-  putStr topStr
-  forM_ [1..5] $ \i -> do
-    setCursorPosition (yPos+i) xPos
-    putStr middleStr
-  setCursorPosition (yPos+5) xPos
-  putStr bottomStr
-  setCursorPosition (yPos+1) (xPos+1)
-  putStr txt
-  setCursorPosition (yPos+2) (xPos+1)
-  putStr txtAsc
-  setCursorPosition (yPos+3) (xPos+1)
-  putStr txtDesc
-  setCursorPosition (yPos+4) (xPos+1)
-  putStr txtNo
-  restoreCursor
+  showInRectangle xPos yPos lentxt [txt, txtAsc, txtDesc, txtNo]
   key <- getKey
   case key of
     "a" -> mainLoop (stateWithNewSort appState columnName Asc)
     "d" -> mainLoop (stateWithNewSort appState columnName Desc)
     "n" -> mainLoop (stateWithNoSortForColumn appState columnName)
     _ -> sortDirectionDialog columnName appState
+
+showInRectangle :: Int -> Int -> Int -> [String] -> IO ()
+showInRectangle xPos yPos width rows = do
+  let
+    topStr    = "┌" ++ (replicate width '─') ++ "┐"
+    middleStr = "│" ++ (replicate width ' ') ++ "│"
+    bottomStr = "└" ++ (replicate width '─') ++ "┘"
+  saveCursor
+  setCursorPosition yPos xPos
+  putStr topStr
+  forM_ (rows `zip` [1..]) $ \(row, rownum) -> do
+    setCursorPosition (yPos+rownum) xPos
+    putStr middleStr
+    setCursorPosition (yPos+rownum) (xPos+1)
+    putStr row
+  setCursorPosition (yPos + (length rows) + 1) xPos
+  putStr bottomStr
+  restoreCursor
 
 --dialogSortOrFilter :: IO ()
 --dialogSortOrFilter = do
@@ -280,19 +264,68 @@ sortDirectionDialog columnName appState = do
 
 data EditModeInfoData = EditModeInfo { columnIndex :: Int }
 
--- TODO two modes: regular and "sorts and filters editing" mode
+
 printTable :: AppStateData -> Maybe EditModeInfoData -> IO ()
 printTable appState@(AppState appRows (PagingInfo rowsPerPage rowOffset) sorts filters) maybeEditModeInfo = do
   let
-    rowsToPrint = take rowsPerPage (drop rowOffset appRows)
+    rowsToPrint = fmap rowAsStrings $ take rowsPerPage $ drop rowOffset $ appRows
+    rowAsStrings row =
+      let
+        a = show . getA $ row
+        b = getB row
+        c = getC row
+        d = show . getD $ row
+      in [a,b,c,d]
     columnWidth = 14
     columnCount = 4
+    x0 = 0
+    y0 = 0
+    firstRowIndex = if (length filters) > 0 then 2 else 1
+    columnNames = ("a":"b":"c":"d":[])
+    sortDirectionOf :: [(String, SortDirection)] -> String -> Maybe SortDirection
+    sortDirectionOf [] columnName = Nothing
+    sortDirectionOf ((cn, sd):sortz) columnName = if cn == columnName then Just(sd) else sortDirectionOf sortz columnName
+    strN n str = concat (replicate n str)
+    headerAsCellsDataRow =
+      let
+        sortDirectionsOptional = map (sortDirectionOf sorts) columnNames
+        sortDirectionSymbol :: Maybe SortDirection -> String
+        sortDirectionSymbol (Nothing) = ""
+        sortDirectionSymbol (Just(Asc)) = "↑"
+        sortDirectionSymbol (Just(Desc)) = "↓"
+        appendSortDirection columnName = columnName ++ (strN (columnWidth - (length columnName) - 1) " ") ++ (sortDirectionSymbol (sortDirectionOf sorts columnName))
+        columnNamesWithSorts = map appendSortDirection columnNames
+      in columnNamesWithSorts
+    filterOf [] columnName = Nothing
+    filterOf ((cn, term):fs) columnName = if cn == columnName then Just(term) else filterOf fs columnName
+    filtersAsCellsDataRow =
+      if (length filters) > 0
+        then Just filterTerms
+        else Nothing
+      where
+        filterTermsOptional = map (filterOf filters) columnNames
+        optToStr :: Maybe String -> String
+        optToStr (Nothing) = ""
+        optToStr (Just(s)) = s
+        filterTerms = map optToStr filterTermsOptional
+    activeCellCoords = fmap (\(EditModeInfo columnIndex) -> (columnIndex, 0)) maybeEditModeInfo 
+    cellsData =
+      let
+        exceptHeader = case filtersAsCellsDataRow of
+                          Nothing -> rowsToPrint
+                          Just(filtersRow) -> filtersRow : rowsToPrint
+      in headerAsCellsDataRow : exceptHeader
+  showInGrid x0 y0 columnCount columnWidth activeCellCoords cellsData
+
+showInGrid :: Int -> Int -> Int -> Int -> Maybe (Int, Int) -> [[String]] -> IO ()
+showInGrid xUpperLeft yUpperLeft columnCount columnWidth activeCellCoords cellsData = do
+  let
+    x0 = xUpperLeft
+    y0 = yUpperLeft
     topStr         = "┌" ++ (intercalate "┬" (replicate columnCount (replicate columnWidth '─'))) ++ "┐"
     rowBoxStr      = "│" ++ (intercalate "│" (replicate columnCount (replicate columnWidth ' '))) ++ "│"
     betweenRowsStr = "├" ++ (intercalate "┼" (replicate columnCount (replicate columnWidth '─'))) ++ "┤"
     bottomStr      = "└" ++ (intercalate "┴" (replicate columnCount (replicate columnWidth '─'))) ++ "┘"
-    x0 = 0
-    y0 = 0
     printRowBox rowIndex = do
       if rowIndex == 0
         then do
@@ -303,95 +336,42 @@ printTable appState@(AppState appRows (PagingInfo rowsPerPage rowOffset) sorts f
           putStr betweenRowsStr
           setCursorPosition (y0+rowIndex*2+1) x0
           putStr rowBoxStr
-    firstRowIndex = if (length filters) > 0 then 2 else 1
-    printRows = do
-      forM_ (zip rowsToPrint [firstRowIndex..]) $ \(row, rowIndex) -> do
-        let
-          a = show . getA $ row
-          b = getB row
-          c = getC row
-          d = show . getD $ row
-        printRowValues (a:b:c:d:[]) rowIndex
-    highlightCurrentColumn = do
-      case maybeEditModeInfo of
-        Nothing -> return ()
-        Just(EditModeInfo columnIndex) -> do
-          let
-            yPos = y0
-            xPosLeft = x0 + (columnWidth+1)*columnIndex
-            xPosRight = xPosLeft + 1 + columnWidth
-            leftUpperCorner = if columnIndex == 0 then "┏" else "┲"
-            leftBottomCorner = if columnIndex == 0 then "┡" else "╄"
-            rightUpperCorner = if columnIndex == 3 then "┓" else "┱"
-            rightBottomCorner = if columnIndex == 3 then "┩" else "╃"
-            topStr = leftUpperCorner ++ (replicate columnWidth '━') ++ rightUpperCorner
-            bottomStr = leftBottomCorner ++ (replicate columnWidth '━') ++ rightBottomCorner
-          setCursorPosition yPos xPosLeft
-          putStr topStr
-          setCursorPosition (yPos+2) xPosLeft
-          putStr bottomStr
-          setCursorPosition (yPos+1) xPosLeft
-          putStr "┃"
-          setCursorPosition (yPos+1) xPosRight
-          putStr "┃"
-    printRowValues (a : b : c : d : _) rowIndex = do
+    highlightCurrentColumn (activeCellX, activeCellY) = do
       let
-        yPos = y0+1+rowIndex*2
-        x1 = x0+1
-        x2 = x0+1+columnWidth+1
-        x3 = x0+1+(columnWidth+1)*2
-        x4 = x0+1+(columnWidth+1)*3
-      setCursorPosition yPos x1
-      putStr a
-      setCursorPosition yPos x2
-      putStr b
-      setCursorPosition yPos x3
-      putStr c
-      setCursorPosition yPos x4
-      putStr d
-    columnNames = ("a":"b":"c":"d":[])
-    sortDirectionOf :: [(String, SortDirection)] -> String -> Maybe SortDirection
-    sortDirectionOf [] columnName = Nothing
-    sortDirectionOf ((cn, sd):sortz) columnName = if cn == columnName then Just(sd) else sortDirectionOf sortz columnName
-    strN n str = concat (replicate n str)
-    printHeader = do
+        yPos = yUpperLeft
+        xPosLeft = xUpperLeft + (columnWidth+1)*activeCellX
+        xPosRight = xPosLeft + 1 + columnWidth
+        leftUpperCorner = if activeCellX == 0 then "┏" else "┲"
+        leftBottomCorner = if activeCellX == 0 then "┡" else "╄"
+        rightUpperCorner = if activeCellX == (columnCount-1) then "┓" else "┱"
+        rightBottomCorner = if activeCellX == (columnCount-1) then "┩" else "╃"
+        topStr = leftUpperCorner ++ (replicate columnWidth '━') ++ rightUpperCorner
+        bottomStr = leftBottomCorner ++ (replicate columnWidth '━') ++ rightBottomCorner
+      setCursorPosition yPos xPosLeft
+      putStr topStr
+      setCursorPosition (yPos+2) xPosLeft
+      putStr bottomStr
+      setCursorPosition (yPos+1) xPosLeft
+      putStr "┃"
+      setCursorPosition (yPos+1) xPosRight
+      putStr "┃"
+    printRowValues row rowIndex = do
       let
-        sortDirectionsOptional = map (sortDirectionOf sorts) columnNames
-        sortDirectionSymbol :: Maybe SortDirection -> String
-        sortDirectionSymbol (Nothing) = ""
-        sortDirectionSymbol (Just(Asc)) = "↑"
-        sortDirectionSymbol (Just(Desc)) = "↓"
-        appendSortDirection columnName = columnName ++ (strN (columnWidth - (length columnName) - 1) " ") ++ (sortDirectionSymbol (sortDirectionOf sorts columnName))
-        columnNamesWithSorts = map appendSortDirection columnNames
-      printRowValues columnNamesWithSorts 0
-    filterOf [] columnName = Nothing
-    filterOf ((cn, term):fs) columnName = if cn == columnName then Just(term) else filterOf fs columnName
-    printFilters = do
-      let
-        filterTermsOptional = map (filterOf filters) columnNames
-        optToStr :: Maybe String -> String
-        optToStr (Nothing) = ""
-        optToStr (Just(s)) = s
-        filterTerms = map optToStr filterTermsOptional
-      if (length filters) > 0
-        then printRowValues filterTerms 1
-        else return ()
-    countRowsInBox = if (length filters) > 0 then (length rowsToPrint) + 1 else (length rowsToPrint)
+        yPos = yUpperLeft+1+rowIndex*2
+      forM_ (row `zip` [0..]) $ \(cellValue, cellIndex) -> do
+        setCursorPosition yPos (xUpperLeft + 1 + (columnWidth+1)*cellIndex)
+        putStr cellValue
   saveCursor
   clearScreen
-  setCursorPosition y0 x0
+  setCursorPosition yUpperLeft xUpperLeft
   putStr topStr
-  forM_ [0 .. countRowsInBox] printRowBox
-  setCursorPosition (y0+(countRowsInBox + 1)*2) x0
+  forM_ [0 .. (length cellsData) - 1] printRowBox
+  setCursorPosition (yUpperLeft+(length cellsData)*2) xUpperLeft
   putStr bottomStr
-  printHeader
-  highlightCurrentColumn
-  printFilters
-  printRows
+  forM_ activeCellCoords highlightCurrentColumn
+  forM_ (cellsData `zip` [0..]) $ \(row, rowIndex) -> do
+    printRowValues row rowIndex
   restoreCursor
-  --setCursorPosition (y0+(length rowsToPrint)*2+3) x0
-  --forM_ rowsToPrint (putStrLn . show)
-
 
 --loop :: IO ()
 --loop = do
